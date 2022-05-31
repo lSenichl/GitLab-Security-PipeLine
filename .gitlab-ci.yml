@@ -1,0 +1,11 @@
+stages:          # List of stages for jobs, and their order of execution
+  - lint
+
+lint:
+  stage: lint
+  image: sdesbure/yamllint
+  script:
+    - yamllint ./templates
+  only:
+    - master
+    - merge_requests

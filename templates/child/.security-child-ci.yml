@@ -1,0 +1,79 @@
+---
+stages: [test, upload]
+
+variables:
+  GITLEAKS_VERSION: "v8.2.7"
+  SEMGREP_VERSION: "develop"
+  SEMGREP_RULES: "p/ci" # more at semgrep.dev/explore (p/java)
+  SAST_ARTIFACT: "semgrep.mr-$CI_MERGE_REQUEST_IID-$CI_COMMIT_SHORT_SHA.sarif"
+  SECRETS_ARTIFACT: "secrets.mr-$CI_MERGE_REQUEST_IID-$CI_COMMIT_SHORT_SHA.sarif"
+
+secret-detect:  # Проверка на секреты
+  stage: test
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "parent_pipeline"'
+  image:
+    name: "zricethezav/gitleaks:${GITLEAKS_VERSION}"
+    entrypoint: [""]
+  allow_failure: true
+  artifacts:
+    when: always
+    paths:
+      - $SECRETS_ARTIFACT
+
+  script:
+    - cd $CI_PROJECT_DIR
+    - git fetch origin $CI_MERGE_REQUEST_TARGET_BRANCH_NAME $CI_COMMIT_REF_NAME
+    - git checkout $CI_COMMIT_REF_NAME
+    - gitleaks detect --source $CI_PROJECT_DIR --verbose --report-path $SECRETS_ARTIFACT --log-opts="--all refs/remotes/origin/$CI_MERGE_REQUEST_TARGET_BRANCH_NAME..refs/remotes/origin/$CI_MERGE_REQUEST_SOURCE_BRANCH_NAME" || LEAK_EXIT_CODE=$?
+    # Conditions for leaks found/not 
+    - |
+      if [ -z $LEAK_EXIT_CODE ]
+        then
+          echo "Secrets has not been found"
+        exit 0
+      elif [ $LEAK_EXIT_CODE = "1" ]
+      then
+        echo "Secrets has been found"
+        exit 0
+      else
+        echo "Error has been occured"
+      fi
+
+sast-semgrep:
+  stage: test
+  rules:
+    - if: '$UPSTREAM_SOURCE == "merge_request_event"'
+  image:
+    name: "returntocorp/semgrep:$SEMGREP_VERSION"
+    entrypoint: [""]
+  allow_failure: true
+  artifacts:
+    when: always
+    paths:
+      - $SAST_ARTIFACT  
+  script:
+    - >
+      semgrep
+      $CI_PROJECT_DIR
+      --disable-version-check
+      --disable-nosem
+      --config $SEMGREP_RULES
+      --sarif
+      --error
+      --metrics=off
+      1> $SAST_ARTIFACT
+      || SAST_EXIT_CODE=$?
+    # Conditions for sast found/not
+    - |
+      if [ -z $SAST_EXIT_CODE ]
+        then
+          echo "SAST has not been found"
+        exit 0
+      elif [ $SAST_EXIT_CODE = "1" ]
+      then
+        echo "SAST has been found"
+        exit 0
+      else
+        echo "Error has been occured"
+      fi

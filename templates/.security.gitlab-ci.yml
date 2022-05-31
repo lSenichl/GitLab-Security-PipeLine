@@ -1,0 +1,19 @@
+---
+security-pipeline:
+  variables:
+    UPSTREAM_SOURCE: $CI_PIPELINE_SOURCE
+    UPSTREAM_BRANCH: $CI_COMMIT_REF_NAME
+  stage: .pre
+  trigger:
+    # strategy: depend                                     # To run in parallel
+    include:
+      - project: 'matsumori/security-pipeline'
+        ref: main
+        file: 'templates/child/.security-child-ci.yml'
+
+  rules:
+    # --- CONDITIONS ---
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH && $CI_OPEN_MERGE_REQUESTS'
+      when: never
+    - if: '$CI_COMMIT_BRANCH'
