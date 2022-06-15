@@ -2,69 +2,185 @@
 stages: [test, upload]
 
 variables:
-  GITLEAKS_VERSION: "v8.2.7"
-  SEMGREP_VERSION: "develop"
-  SEMGREP_RULES: "p/ci" # more at semgrep.dev/explore (p/java)
-  SAST_ARTIFACT: "semgrep.mr-$CI_MERGE_REQUEST_IID-$CI_COMMIT_SHORT_SHA.sarif"
-  SECRETS_ARTIFACT: "secrets.mr-$CI_MERGE_REQUEST_IID-$CI_COMMIT_SHORT_SHA.sarif"
+  DEPENDENCY_ARTIFACT: "dependency.mr-$CI_MERGE_REQUEST_IID-$CI_COMMIT_SHORT_SHA.sarif"
+  DEPENDENCY_OPTS: "--project $CI_PROJECT_NAME --out $DEPENDENCY_ARTIFACT --enableExperimental --failOnCVSS 7 --format SARIF"
+  
+  SEMGREP_ARTIFACT: "semgrep.mr-$CI_MERGE_REQUEST_IID-$CI_COMMIT_SHORT_SHA.sarif"
+  SEMGREP_RULES: "--config p/flask --config p/react --config p/owasp-top-ten --config p/security-audit"
+  SEMGREP_OPTS: "$CI_PROJECT_DIR --lang java --disable-version-check --disable-nosem --sarif --error --metrics=off $SEMGREP_RULES"
 
-secret-detect:  # Проверка на секреты
+  KICS_ARTIFACT: "kics.mr-$CI_MERGE_REQUEST_IID-$CI_COMMIT_SHORT_SHA.sarif"
+  KICS_OPTS: "-s --no-progress -p $CI_PROJECT_DIR -o $CI_PROJECT_DIR --report-formats sarif --output-name $KICS_ARTIFACT"
+
+  SECRETS_ARTIFACT: "secrets.mr-$CI_MERGE_REQUEST_IID-$CI_COMMIT_SHORT_SHA.sarif"
+  SECRETS_OPTS: "--source $CI_PROJECT_DIR --verbose --report-path $SECRETS_ARTIFACT"
+
+  DEFECTDOJO_URL: YOUR_URL
+  DEFECTDOJO_TOKEN: YOUR_TOKEN
+  DEFECTDOJO_PRODUCTID: YOUR_ID
+
+  DEFECTDOJO_ENGAGEMENT_PERIOD: 7
+  DEFECTDOJO_ENGAGEMENT_STATUS: "Not Started"
+  DEFECTDOJO_ENGAGEMENT_BUILD_SERVER: "null"
+  DEFECTDOJO_ENGAGEMENT_SOURCE_CODE_MANAGEMENT_SERVER: "null"
+  DEFECTDOJO_ENGAGEMENT_ORCHESTRATION_ENGINE: "null"
+  DEFECTDOJO_ENGAGEMENT_DEDUPLICATION_ON_ENGAGEMENT: "false"
+  DEFECTDOJO_ENGAGEMENT_THREAT_MODEL: "true"
+  DEFECTDOJO_ENGAGEMENT_API_TEST: "true"
+  DEFECTDOJO_ENGAGEMENT_PEN_TEST: "true"
+  DEFECTDOJO_ENGAGEMENT_CHECK_LIST: "true"
+  DEFECTDOJO_NOT_ON_MASTER: "false"
+  DEFECTDOJO_SCAN_MINIMUM_SEVERITY: "Info"
+  DEFECTDOJO_SCAN_ACTIVE: "true"
+  DEFECTDOJO_SCAN_VERIFIED: "true"
+  DEFECTDOJO_SCAN_CLOSE_OLD_FINDINGS: "true"
+  DEFECTDOJO_SCAN_PUSH_TO_JIRA: "false"
+  DEFECTDOJO_SCAN_ENVIRONMENT: "Default"
+  DEFECTDOJO_ANCHORE_DISABLE: "false"
+
+defectdojo_create_engagement:
+  stage: .pre
+  image: alpine
+  variables:
+    GIT_STRATEGY: none
+  allow_failure: true
+  rules:
+    - if: '$DEFECTDOJO_NOT_ON_MASTER == "true" && $CI_COMMIT_BRANCH == "master"'
+      when: never
+    - when: always
+  before_script:
+    - apk add curl jq coreutils
+    - TODAY=`date +%Y-%m-%d`
+    - ENDDAY=$(date -d "+${DEFECTDOJO_ENGAGEMENT_PERIOD} days" +%Y-%m-%d)
+  script:
+    - |
+        ENGAGEMENTID=`curl --fail --location --request POST "${DEFECTDOJO_URL}/engagements/" \
+              --header "Authorization: Token ${DEFECTDOJO_TOKEN}" \
+              --header 'Content-Type: application/json' \
+                --data-raw "{
+                  \"tags\": [\"GITLAB-CI\"],
+                  \"name\": \"#${CI_PIPELINE_ID}\",
+                  \"description\": \"${CI_COMMIT_DESCRIPTION}\",
+                  \"version\": \"${CI_COMMIT_REF_NAME}\",
+                  \"first_contacted\": \"${TODAY}\",
+                  \"target_start\": \"${TODAY}\",
+                  \"target_end\": \"${ENDDAY}\",
+                  \"reason\": \"string\",
+                  \"tracker\": \"${CI_PROJECT_URL}/-/issues\",
+                  \"threat_model\": \"${DEFECTDOJO_ENGAGEMENT_THREAT_MODEL}\",
+                  \"api_test\": \"${DEFECTDOJO_ENGAGEMENT_API_TEST}\",
+                  \"pen_test\": \"${DEFECTDOJO_ENGAGEMENT_PEN_TEST}\",
+                  \"check_list\": \"${DEFECTDOJO_ENGAGEMENT_CHECK_LIST}\",
+                  \"status\": \"${DEFECTDOJO_ENGAGEMENT_STATUS}\",
+                  \"engagement_type\": \"CI/CD\",
+                  \"build_id\": \"${CI_PIPELINE_ID}\",
+                  \"commit_hash\": \"${CI_COMMIT_SHORT_SHA}\",
+                  \"branch_tag\": \"${CI_COMMIT_REF_NAME}\",
+                  \"deduplication_on_engagement\": \"${DEFECTDOJO_ENGAGEMENT_DEDUPLICATION_ON_ENGAGEMENT}\",
+                  \"product\": \"${DEFECTDOJO_PRODUCTID}\",
+                  \"source_code_management_uri\": \"${CI_PROJECT_URL}\",
+                  \"build_server\": ${DEFECTDOJO_ENGAGEMENT_BUILD_SERVER},
+                  \"source_code_management_server\": ${DEFECTDOJO_ENGAGEMENT_SOURCE_CODE_MANAGEMENT_SERVER},
+                  \"orchestration_engine\": ${DEFECTDOJO_ENGAGEMENT_ORCHESTRATION_ENGINE}
+                }" | jq -r '.id'`
+    - echo "DEFECTDOJO_ENGAGEMENTID=${ENGAGEMENTID}" >> defectdojo.env
+  artifacts:
+    reports:
+      dotenv: defectdojo.env
+
+
+defectdojo_publish:
+  stage: .post
+  image: alpine
+  rules:
+    - when: never
+  before_script:
+    - apk add curl coreutils
+    - TODAY=`date +%Y-%m-%d`
+  script:
+    - echo "$CI_JOB_NAME is used for configuration only, and its script should not be executed"
+    - exit 1
+
+# Template Job for publishing the SAST reports to DefectDojo
+.defectdojo_upload:
+  extends: defectdojo_publish
+  allow_failure: true
+  script:
+    - |
+        curl --fail --location --request POST "${DEFECTDOJO_URL}/import-scan/" \
+            --header "Authorization: Token ${DEFECTDOJO_TOKEN}" \
+            --form "scan_date=\"${TODAY}\"" \
+            --form "minimum_severity=\"${DEFECTDOJO_SCAN_MINIMUM_SEVERITY}\"" \
+            --form "active=\"${DEFECTDOJO_SCAN_ACTIVE}\"" \
+            --form "verified=\"${DEFECTDOJO_SCAN_VERIFIED}\"" \
+            --form "scan_type=\"${DEFECTDOJO_SCAN_TYPE}\"" \
+            --form "engagement=\"${DEFECTDOJO_ENGAGEMENTID}\"" \
+            --form "file=@${DEFECTDOJO_SCAN_FILE}" \
+            --form "close_old_findings=\"${DEFECTDOJO_SCAN_CLOSE_OLD_FINDINGS}\"" \
+            --form "push_to_jira=\"${DEFECTDOJO_SCAN_PUSH_TO_JIRA}\"" \
+            --form "test_type=\"${DEFECTDOJO_SCAN_TEST_TYPE}\"" \
+            --form "environment=\"${DEFECTDOJO_SCAN_ENVIRONMENT}\"" \
+            --form "scan_type"="SARIF"
+
+# 1. SCA (DependencyCheck)
+dependency-check:
   stage: test
   rules:
-    - if: '$CI_PIPELINE_SOURCE == "parent_pipeline"'
+    - if: '$UPSTREAM_SOURCE == "merge_request_event"'
   image:
-    name: "zricethezav/gitleaks:${GITLEAKS_VERSION}"
+    name: "owasp/dependency-check:latest"
     entrypoint: [""]
   allow_failure: true
   artifacts:
     when: always
     paths:
-      - $SECRETS_ARTIFACT
-
+      - $DEPENDENCY_ARTIFACT
   script:
-    - cd $CI_PROJECT_DIR
-    - git fetch origin $CI_MERGE_REQUEST_TARGET_BRANCH_NAME $CI_COMMIT_REF_NAME
-    - git checkout $CI_COMMIT_REF_NAME
-    - gitleaks detect --source $CI_PROJECT_DIR --verbose --report-path $SECRETS_ARTIFACT --log-opts="--all refs/remotes/origin/$CI_MERGE_REQUEST_TARGET_BRANCH_NAME..refs/remotes/origin/$CI_MERGE_REQUEST_SOURCE_BRANCH_NAME" || LEAK_EXIT_CODE=$?
-    # Conditions for leaks found/not 
+    - /usr/share/dependency-check/bin/dependency-check.sh $DEPENDENCY_OPTS --scan "./" || DEPENDENCY_EXIT_CODE=$?
     - |
-      if [ -z $LEAK_EXIT_CODE ]
+      if [ -z $DEPENDENCY_EXIT_CODE ]
         then
-          echo "Secrets has not been found"
+          echo "Dependency checker has been found"
         exit 0
-      elif [ $LEAK_EXIT_CODE = "1" ]
+      elif [ $DEPENDENCY_EXIT_CODE = "1" ]
       then
-        echo "Secrets has been found"
+        echo "Dependency checker has not been found"
         exit 0
       else
         echo "Error has been occured"
       fi
 
+dependency-check-defectdojo:
+  extends: .defectdojo_upload
+  needs: ["defectdojo_create_engagement", "dependency-check"]
+  allow_failure: true
+  variables:
+    DEFECTDOJO_SCAN_TYPE: "Dependency Check"
+    DEFECTDOJO_SCAN_TEST_TYPE: "Dependency Check"
+    DEFECTDOJO_SCAN_FILE: "./${DEPENDENCY_ARTIFACT}"
+  rules:
+    - if: '$DEFECTDOJO_NOT_ON_MASTER == "true" && $CI_COMMIT_BRANCH == "master"'
+      when: never
+    - if: '"$DEFECTDOJO_ANCHORE_DISABLE" == "true"'
+      when: never
+    - when: always
+
+
+# 2. SAST (Semgrep)
 sast-semgrep:
   stage: test
   rules:
     - if: '$UPSTREAM_SOURCE == "merge_request_event"'
   image:
-    name: "returntocorp/semgrep:$SEMGREP_VERSION"
+    name: "returntocorp/semgrep:latest"
     entrypoint: [""]
   allow_failure: true
   artifacts:
     when: always
     paths:
-      - $SAST_ARTIFACT  
+      - $SEMGREP_ARTIFACT  
   script:
-    - >
-      semgrep
-      $CI_PROJECT_DIR
-      --disable-version-check
-      --disable-nosem
-      --config $SEMGREP_RULES
-      --sarif
-      --error
-      --metrics=off
-      1> $SAST_ARTIFACT
-      || SAST_EXIT_CODE=$?
-    # Conditions for sast found/not
+    - semgrep $CI_PROJECT_DIR $SEMGREP_OPTS 1> $SEMGREP_ARTIFACT || SAST_EXIT_CODE=$?
     - |
       if [ -z $SAST_EXIT_CODE ]
         then
@@ -77,3 +193,108 @@ sast-semgrep:
       else
         echo "Error has been occured"
       fi
+
+semgrep-defectdojo:
+  extends: .defectdojo_upload
+  needs: ["defectdojo_create_engagement", "sast-semgrep"]
+  allow_failure: true
+  variables:
+    DEFECTDOJO_SCAN_TYPE: "Semgrep"
+    DEFECTDOJO_SCAN_TEST_TYPE: "Semgrep"
+    DEFECTDOJO_SCAN_FILE: "./${SEMGREP_ARTIFACT}"
+  rules:
+    - if: '$DEFECTDOJO_NOT_ON_MASTER == "true" && $CI_COMMIT_BRANCH == "master"'
+      when: never
+    - if: '"$DEFECTDOJO_ANCHORE_DISABLE" == "true"'
+      when: never
+    - when: always
+
+
+# 3.  Secrets
+secret-detect:
+  variables:
+    GIT_DEPTH: 100
+  stage: test
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "parent_pipeline"'
+  image:
+    name: "zricethezav/gitleaks:latest"
+    entrypoint: [""]
+  allow_failure: true
+  artifacts:
+    when: always
+    paths:
+      - $SECRETS_ARTIFACT
+  script:
+    - gitleaks detect $SECRETS_OPTS --log-opts="--all" || SECRET_EXIT_CODE=$?
+    - |
+      if [ -z $SECRET_EXIT_CODE ]
+        then
+          echo "Secrets has not been found"
+        exit 0
+      elif [ $SECRET_EXIT_CODE = "1" ]
+      then
+        echo "Secrets has been found"
+        exit 0
+      else
+        echo "Error has been occured"
+      fi
+
+secret-detect-defectdojo:
+  extends: .defectdojo_upload
+  needs: ["defectdojo_create_engagement", "secret-detect"]
+  allow_failure: true
+  variables:
+    DEFECTDOJO_SCAN_TYPE: "Secrets"
+    DEFECTDOJO_SCAN_TEST_TYPE: "Secrets"
+    DEFECTDOJO_SCAN_FILE: "./${SECRETS_ARTIFACT}"
+  rules:
+    - if: '$DEFECTDOJO_NOT_ON_MASTER == "true" && $CI_COMMIT_BRANCH == "master"'
+      when: never
+    - if: '"$DEFECTDOJO_ANCHORE_DISABLE" == "true"'
+      when: never
+    - when: always
+
+
+# 4. IaC (KICS)
+kics-scan:
+  stage: test
+  rules:
+    - if: '$UPSTREAM_SOURCE == "merge_request_event"'
+  image:
+    name: checkmarx/kics:latest
+    entrypoint: [""]
+  allow_failure: true
+  artifacts:
+    when: always
+    paths:
+      - $KICS_ARTIFACT
+  script:
+      - kics scan $KICS_OPTS || KICS_EXIT_CODE=$?
+      - |
+        if [ -z $KICS_EXIT_CODE ]
+          then
+            echo "KICS has not been found"
+          exit 0
+        elif [ $KICS_EXIT_CODE = "50" ]
+        then
+          echo "KICS has been found"
+          exit 0
+        else
+          echo "Error has been occured"
+        fi 
+
+kics-defectdojo:
+  extends: .defectdojo_upload
+  needs: ["defectdojo_create_engagement", "kics-scan"]
+  allow_failure: true
+  variables:
+    DEFECTDOJO_SCAN_TYPE: "KICS"
+    DEFECTDOJO_SCAN_TEST_TYPE: "Secrets"
+    DEFECTDOJO_SCAN_FILE: "./${KICS_ARTIFACT}"
+  rules:
+    - if: '$DEFECTDOJO_NOT_ON_MASTER == "true" && $CI_COMMIT_BRANCH == "master"'
+      when: never
+    - if: '"$DEFECTDOJO_ANCHORE_DISABLE" == "true"'
+      when: never
+    - when: always
